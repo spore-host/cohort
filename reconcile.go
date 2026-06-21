@@ -68,6 +68,7 @@ type entityTracker struct {
 	intent          EntityIntent
 	phase           Phase
 	enrolled        bool             // true only when waitEnrolled returned success
+	enrollDetail    string           // Readiness.Detail from a successful enrollment (for explain)
 	attempts        []Attempt
 	terminal        *Fault           // set when this entity cannot recover
 	cohortCancelled *CohortCancelInfo // cohort fast-failed around this healthy entity
@@ -543,8 +544,15 @@ func (r *Reconciler) waitEnrolled(ctx context.Context, tr *entityTracker) {
 		if r.Enroller != nil {
 			readiness, err := r.Enroller.IsEnrolled(ctx, tr.intent.ID)
 			if err == nil && readiness.OK() {
+				// Record the human-readable Detail for explain — but do NOT
+				// overwrite Observation.Address with it. Address is
+				// infrastructure truth from the Observer (the private IP the
+				// Assembler needs for hostfile/PMIx wire-up); Detail is a display
+				// string ("efa ok"). Clobbering the IP with Detail broke the
+				// MPI assembly phase — found by the first consumer that actually
+				// reads Address through Assemble (spawn-MPI).
 				tr.mu.Lock()
-				tr.obs.Address = readiness.Detail
+				tr.enrollDetail = readiness.Detail
 				tr.mu.Unlock()
 				return // enrolled successfully; caller sets PhaseEnrolled
 			}
@@ -602,6 +610,7 @@ func (r *Reconciler) buildRecord(tr *entityTracker, cohortID CohortID) Record {
 		Terminal:        tr.terminal,
 		CohortCancelled: tr.cohortCancelled,
 		ParentCancelled: tr.parentCancelled,
+		EnrollDetail:    tr.enrollDetail,
 		StartedAt:       tr.startedAt,
 		FinishedAt:      time.Now(),
 	}

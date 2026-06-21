@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Enrollment no longer destroys an entity's observed address. `waitEnrolled`
+  was assigning `Readiness.Detail` (a human-readable display string, e.g.
+  "efa ok") into `Observation.Address` — the private IP the `Assembler` needs
+  for MPI hostfile / PMIx wire-up. So a successful enrollment overwrote the
+  address with display text, and the collective assembly phase received
+  addressless members. `Address` now stays as the Observer reported it
+  (infrastructure truth); `Readiness.Detail` is surfaced where it was always
+  documented to go — `Record.EnrollDetail`, rendered by `Explain()`. Found by
+  the first consumer (spawn-MPI) that actually reads `Address` through
+  `Assemble`; cohort's own suite missed it because its assemblers were no-ops.
+  Added a regression test that an Assembler receives the observed address, not
+  the Detail string.
+
 ### Changed
 - **BREAKING (#1): `EntityIntent.Rung` + `FallbackChain` replaced by an opaque
   `Placement` seam.** The EC2/capacity-market vocabulary (`InstanceType`,
