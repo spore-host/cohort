@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `scripts/guard-cohort.sh` + a `make guard` target + a required CI step that
+  assert the core imports no cloud SDK and no scheduler (#2). API.md §8 calls
+  this guard "not optional" — it's the invariant that lets every consumer trust
+  the same unmodified core — but it didn't travel into the standalone repo's CI
+  (which ran only build/vet/test). The dependency graph is clean today
+  (`golang.org/x/sync` only); this locks that in.
+
 ## [0.1.0] - 2026-05-30
 
 ### Added

@@ -21,6 +21,12 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # Enforce cohort's import discipline: the core must import no cloud SDK
+      # and no scheduler (doc.go, API.md §8 — "not optional"). This is the
+      # invariant that lets every consumer trust the SAME unmodified core.
+      - name: Guard (no cloud SDK / scheduler imports)
+        run: ./scripts/guard-cohort.sh
+
       - name: Vet
         run: go vet ./...
 
