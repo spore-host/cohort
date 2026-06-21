@@ -75,6 +75,17 @@ type entityTracker struct {
 	parentCancelled *ParentCancelInfo // parent context cancelled the whole reconcile
 	obs             Observation
 	startedAt       time.Time
+
+	// collective marks a member of a collective cohort that places as a unit
+	// (#5). When set, doLaunch must NOT advance this member's placement on a
+	// capacity fault — the cohort-level round loop owns advancement (all members
+	// share one rung; advancing per-entity would break the placement-group AZ
+	// invariant). Instead doLaunch records the attempt and returns via
+	// capacityBlocked so the round loop can drain + advance the shared rung +
+	// restart every member together.
+	collective       bool
+	capacityBlocked  bool   // set by doLaunch when a collective member hit CapacityExhausted
+	capacityFault    Fault  // the fault that blocked it (for the round loop's records)
 }
 
 func (t *entityTracker) addAttempt(rung PlacementRung, phase Phase, f *Fault) {
@@ -156,13 +167,34 @@ func (r *Reconciler) Reconcile(ctx context.Context, c Cohort) (Outcome, error) {
 		minViable = len(c.Members)
 	}
 
-	// Build per-entity trackers.
+	// Build per-entity trackers. A collective cohort places as a unit (#5):
+	// every member starts on the SAME shared placement and advances together via
+	// the round loop below — never per-entity, which would break the placement
+	// group's AZ invariant.
+	collective := c.placesAsUnit()
 	trackers := make([]*entityTracker, len(c.Members))
 	for i, m := range c.Members {
 		trackers[i] = &entityTracker{
-			intent:    m,
-			phase:     PhaseLaunchAcked,
-			startedAt: now,
+			intent:     m,
+			phase:      PhaseLaunchAcked,
+			startedAt:  now,
+			collective: collective,
+		}
+	}
+
+	// Collective launch: drive the LAUNCH phase as cohort-level rounds over the
+	// shared rung before the per-entity running/enrolled/barrier loop. Returns
+	// false (with terminals/records set) if the shared chain is exhausted.
+	if collective {
+		if !r.launchCollective(ctx, trackers, c.Budget) {
+			// Shared chain exhausted — every member is terminal. Build records
+			// and return without assembly.
+			outcome := Outcome{Cohort: c.ID, Records: make(map[EntityID]Record, len(trackers))}
+			for _, tr := range trackers {
+				outcome.Records[tr.intent.ID] = r.buildRecord(tr, c.ID)
+			}
+			outcome.Ready = false
+			return outcome, nil
 		}
 	}
 
@@ -374,16 +406,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, c Cohort) (Outcome, error) {
 //     Inside reconcileEntity we cannot tell which cancel it was — and we don't
 //     need to: the phase loop's job is only to stop cleanly.
 func (r *Reconciler) reconcileEntity(ctx context.Context, tr *entityTracker, budget PhaseBudget) {
-	// Phase 1: launch-acked.
-	phase1Ctx, cancel1 := context.WithTimeout(ctx, budget.LaunchAcked)
-	defer cancel1()
+	// Phase 1: launch-acked. A collective member was already launched (acked on
+	// the shared rung) by launchCollective, so skip straight to running (#5).
+	if tr.getPhase() == PhaseLaunchAcked {
+		phase1Ctx, cancel1 := context.WithTimeout(ctx, budget.LaunchAcked)
+		defer cancel1()
 
-	if !r.doLaunch(phase1Ctx, tr) {
-		// If terminal was set, this is a real failure. Otherwise the entity was
-		// cancelled by fastFailCancel — leave it non-terminal.
-		return
+		if !r.doLaunch(phase1Ctx, tr) {
+			// If terminal was set, this is a real failure. Otherwise the entity was
+			// cancelled by fastFailCancel — leave it non-terminal.
+			return
+		}
+		tr.setPhase(PhaseRunning)
 	}
-	tr.setPhase(PhaseRunning)
 
 	// Phase 2: running.
 	phase2Ctx, cancel2 := context.WithTimeout(ctx, budget.Running)
@@ -403,6 +438,162 @@ func (r *Reconciler) reconcileEntity(ctx context.Context, tr *entityTracker, bud
 	// A cancelled or deadline entity is non-terminal but NOT enrolled.
 	if !tr.isTerminal() {
 		tr.setEnrolled()
+	}
+}
+
+// launchCollective drives the launch phase of a collective cohort as cohort-
+// level rounds over the SHARED placement (#5). Within a round, every member
+// attempts the current shared rung in parallel; doLaunch does not self-advance
+// (the members are marked collective). After the round:
+//
+//   - all members acked        → set them to PhaseRunning, return true; the
+//                                 per-entity loop takes over from running.
+//   - any member capacity-blocked → drain any members that DID launch (a
+//                                 placement group can't span AZs, so the cluster
+//                                 must move as a unit), advance the SHARED rung,
+//                                 reset members, restart the round.
+//   - any member terminal (non-capacity) → fast-fail: every member terminal,
+//                                 return false.
+//   - shared chain exhausted    → every member terminal, return false.
+//
+// The AZ invariant holds by construction: every member is always on the same
+// shared rung, so a per-member fallback can never desynchronize the cohort.
+func (r *Reconciler) launchCollective(ctx context.Context, trackers []*entityTracker, budget PhaseBudget) bool {
+	for {
+		// Attempt the current shared rung across all members in parallel.
+		var wg sync.WaitGroup
+		roundCtx, cancel := context.WithTimeout(ctx, budget.LaunchAcked)
+		for _, tr := range trackers {
+			tr := tr
+			tr.mu.Lock()
+			tr.capacityBlocked = false // reset per round
+			tr.mu.Unlock()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				r.doLaunch(roundCtx, tr)
+			}()
+		}
+		wg.Wait()
+		cancel()
+
+		// Classify the round outcome across all members.
+		var blocked, terminal, acked int
+		for _, tr := range trackers {
+			tr.mu.Lock()
+			switch {
+			case tr.terminal != nil && !tr.capacityBlocked:
+				terminal++
+			case tr.capacityBlocked:
+				blocked++
+			case tr.obs.ProviderID != "":
+				acked++
+			}
+			tr.mu.Unlock()
+		}
+
+		// Any non-capacity terminal → the cohort cannot proceed. The member that
+		// hit the terminal fault is the culprit (it already has tr.terminal set
+		// from doLaunch); the rest are CohortCancelled around it. Drain launched.
+		if terminal > 0 {
+			r.drainCollective(ctx, trackers)
+			r.cohortCancelAroundCulprit(trackers)
+			return false
+		}
+
+		// All members acked on the shared rung → launch phase complete.
+		if blocked == 0 {
+			for _, tr := range trackers {
+				tr.setPhase(PhaseRunning)
+			}
+			return true
+		}
+
+		// Capacity-blocked: drain whatever launched on this rung, then advance the
+		// SHARED rung. Use any member's placement (all identical) to advance.
+		r.drainCollective(ctx, trackers)
+		shared := trackers[0].intent.Placement
+		next, ok := shared.Advance()
+		if !ok {
+			// Shared chain exhausted — the cohort fails on capacity. Preserve the
+			// culprit/survivor distinction: the FIRST capacity-blocked member is
+			// the culprit (Terminal); the rest are CohortCancelled around it. The
+			// cohort fails as a unit, but WHICH member's ICE caused it stays legible.
+			var culprit *entityTracker
+			for _, tr := range trackers {
+				tr.mu.Lock()
+				blockedHere := tr.capacityBlocked
+				tr.mu.Unlock()
+				if blockedHere {
+					culprit = tr
+					break
+				}
+			}
+			if culprit != nil {
+				culprit.setTerminal(PhaseLaunchAcked, culprit.capacityFault)
+				r.cohortCancelAroundCulprit(trackers)
+			} else {
+				// Defensive: no recorded culprit — mark all terminal.
+				f := Fault{Class: FaultCapacityExhausted, Code: "CollectiveCapacityExhausted"}
+				for _, tr := range trackers {
+					tr.setTerminal(PhaseLaunchAcked, f)
+				}
+			}
+			return false
+		}
+		// Re-point every member at the new shared rung and reset launch state.
+		for _, tr := range trackers {
+			tr.mu.Lock()
+			tr.intent.Placement = next
+			tr.capacityBlocked = false
+			tr.obs = Observation{}
+			tr.mu.Unlock()
+		}
+	}
+}
+
+// cohortCancelAroundCulprit, given trackers where exactly one member is already
+// Terminal (the culprit), marks every other member CohortCancelled naming that
+// culprit — the same culprit/survivor legibility the per-entity fast-fail path
+// produces, applied to a collective launch failure (#5).
+func (r *Reconciler) cohortCancelAroundCulprit(trackers []*entityTracker) {
+	var culprit *entityTracker
+	for _, tr := range trackers {
+		if tr.isTerminal() {
+			culprit = tr
+			break
+		}
+	}
+	if culprit == nil {
+		return
+	}
+	culprit.mu.Lock()
+	info := CohortCancelInfo{
+		CulpritID:    culprit.intent.ID,
+		CulpritFault: *culprit.terminal,
+		CulpritPhase: culprit.phase,
+		At:           time.Now(),
+	}
+	culprit.mu.Unlock()
+	for _, tr := range trackers {
+		if tr == culprit || tr.isTerminal() {
+			continue
+		}
+		tr.setCohortCancelled(info)
+	}
+}
+
+// drainCollective terminates any members that launched (have a ProviderID),
+// best-effort, so an abandoned rung leaves nothing billing. Errors are tolerated
+// — Terminate is idempotent and a failed drain must not block the round.
+func (r *Reconciler) drainCollective(ctx context.Context, trackers []*entityTracker) {
+	for _, tr := range trackers {
+		tr.mu.Lock()
+		launched := tr.obs.ProviderID != ""
+		tr.mu.Unlock()
+		if launched {
+			_ = r.Actuator.Terminate(ctx, tr.intent.ID)
+		}
 	}
 }
 
@@ -458,9 +649,20 @@ func (r *Reconciler) doLaunch(ctx context.Context, tr *entityTracker) bool {
 
 		case FaultCapacityExhausted:
 			tr.addAttempt(tr.intent.Placement.Current(), PhaseLaunchAcked, &f)
-			// Advance the fallback ladder through the opaque Placement seam. The
-			// trigger fault stays capacity-named — it's the AWS provider's signal;
-			// a transport provider simply never emits it (#1).
+			if tr.collective {
+				// Collective cohort: do NOT self-advance — that would put this
+				// member on a different rung (AZ) than its siblings, breaking the
+				// placement group. Signal the cohort-level round loop, which
+				// drains and advances the SHARED rung for all members (#5).
+				tr.mu.Lock()
+				tr.capacityBlocked = true
+				tr.capacityFault = f
+				tr.mu.Unlock()
+				return false
+			}
+			// Per-entity (serial/partial): advance the fallback ladder through the
+			// opaque Placement seam. The trigger fault stays capacity-named — it's
+			// the AWS provider's signal; a transport provider never emits it (#1).
 			next, ok := tr.intent.Placement.Advance()
 			if !ok {
 				tr.setTerminal(PhaseLaunchAcked, f)

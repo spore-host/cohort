@@ -161,6 +161,22 @@ func validateIntent(m EntityIntent) error {
 // not collective; an MPI cohort is.
 func (c Cohort) IsCollective() bool { return len(c.Members) > 1 }
 
+// placesAsUnit reports whether this cohort uses SHARED-RUNG placement: all
+// members place on one rung and advance the fallback ladder together (#5). True
+// only for an all-or-nothing cohort (MinViable == full membership, i.e.
+// NewMPICohort) — a tightly-coupled collective where a per-entity fallback to a
+// different rung (AZ) would break the placement group. A partial-success cohort
+// (MinViable < len, e.g. MinViable=1) tolerates members failing independently,
+// so it keeps per-entity placement. Distinct from IsCollective() ("has a
+// barrier", >1 member, gates assembly).
+func (c Cohort) placesAsUnit() bool {
+	mv := c.MinViable
+	if mv == 0 {
+		mv = len(c.Members) // zero-value contract: full membership
+	}
+	return len(c.Members) > 1 && mv == len(c.Members)
+}
+
 // PhaseBudget is the deadline for each phase of reconciliation. Phase 1 is
 // deliberately tight — blowing it means throttling or an API problem, never a
 // capacity problem, and that distinction is load-bearing for legibility.

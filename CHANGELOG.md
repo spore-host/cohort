@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Collective placement: an all-or-nothing cohort now places as a unit (#5).**
+  A cohort with `MinViable == len(Members)` (e.g. `NewMPICohort`) shares ONE
+  placement ladder: any member's capacity fault advances the **cohort's** rung
+  and all members (re)launch on it together, draining anything already up on the
+  abandoned rung. Previously each member advanced its own placement
+  independently — which for MPI silently broke the cluster placement group (one
+  node could fall back to a different AZ than its siblings). The AZ invariant now
+  holds by construction: every member is always on the same rung. Partial-success
+  cohorts (`MinViable < len`) keep per-entity placement, unchanged. The
+  capacity-exhaustion failure still names a culprit (Terminal) with the rest
+  CohortCancelled, preserving legibility. No new API — implied by the
+  all-or-nothing shape. (Design: `docs/collective-placement-design.md`.)
+
 ### Fixed
 - Enrollment no longer destroys an entity's observed address. `waitEnrolled`
   was assigning `Readiness.Detail` (a human-readable display string, e.g.
