@@ -45,6 +45,12 @@ type Record struct {
 	// Reading it as CohortCancelled-with-empty-culprit would be a fabricated story.
 	ParentCancelled *ParentCancelInfo
 
+	// EnrollDetail is the human-readable Readiness.Detail from a successful
+	// enrollment (e.g. "efa ok"), surfaced in Explain(). It is a DISPLAY string
+	// — distinct from Observation.Address, which carries the entity's actual
+	// address for the Assembler.
+	EnrollDetail string
+
 	StartedAt  time.Time
 	FinishedAt time.Time
 }
@@ -149,6 +155,9 @@ func (r Record) Explain() string {
 			out += fmt.Sprintf("  [%d] %s  reached=%s  -> ok  (%s)\n",
 				i+1, rung, a.Phase, a.At.Format(time.RFC3339))
 		}
+	}
+	if r.EnrollDetail != "" {
+		out += fmt.Sprintf("  enrollment: %s\n", r.EnrollDetail)
 	}
 	return out
 }

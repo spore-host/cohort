@@ -57,6 +57,9 @@ func (a *fakeActuator) Terminate(_ context.Context, id EntityID) error {
 type fakeObserver struct {
 	// stateFn lets tests inject per-entity lifecycle state.
 	stateFn func(id EntityID) LifecycleState
+	// addrFn lets tests inject a per-entity observed address — the infra-truth
+	// private IP the Assembler reads. Nil → empty address.
+	addrFn func(id EntityID) string
 }
 
 func (o *fakeObserver) Observe(_ context.Context, ids []EntityID) ([]Observation, error) {
@@ -66,7 +69,11 @@ func (o *fakeObserver) Observe(_ context.Context, ids []EntityID) ([]Observation
 		if o.stateFn != nil {
 			st = o.stateFn(id)
 		}
-		obs[i] = Observation{ID: id, State: st, ObservedAt: time.Now()}
+		addr := ""
+		if o.addrFn != nil {
+			addr = o.addrFn(id)
+		}
+		obs[i] = Observation{ID: id, State: st, Address: addr, ObservedAt: time.Now()}
 	}
 	return obs, nil
 }
@@ -1216,3 +1223,64 @@ func (e *iceError) Error() string { return "InsufficientInstanceCapacity" }
 type termError struct{}
 
 func (e *termError) Error() string { return "UnauthorizedOperation" }
+
+// TestReconciler_AssemblerReceivesObservedAddress is the regression guard for
+// the bug spawn-MPI's adapter spike surfaced: enrollment used to overwrite
+// Observation.Address with Readiness.Detail (a display string), destroying the
+// private IP the Assembler needs for MPI hostfile/PMIx wire-up. cohort's own
+// suite never caught it because no test ran an Assembler that READS Address.
+// This asserts: (1) the Assembler sees the Observer's address, NOT Detail; and
+// (2) Detail still surfaces, via Record.EnrollDetail / Explain().
+func TestReconciler_AssemblerReceivesObservedAddress(t *testing.T) {
+	obs := &fakeObserver{addrFn: func(id EntityID) string { return "10.0.0." + string(id[len(id)-1]) }}
+	enr := &fakeEnroller{enrolledFn: func(id EntityID) Readiness {
+		return Readiness{Enrolled: true, Operational: true, Detail: "efa ok"}
+	}}
+	asm := &fakeAssembler{}
+	r := &Reconciler{Actuator: &fakeActuator{}, Observer: obs, Classifier: &fakeClassifier{}, Enroller: enr, Assembler: asm}
+
+	c := Cohort{
+		ID:        "c-addr",
+		Members:   []EntityIntent{member("n-1"), member("n-2"), member("n-3")},
+		Budget:    fastBudget(),
+		MinViable: 3,
+	}
+	outcome, err := r.Reconcile(context.Background(), c)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !outcome.Ready {
+		t.Fatalf("cohort not Ready: %+v", outcome.Records)
+	}
+
+	// (1) Assembler got real addresses, not the "efa ok" Detail string.
+	if len(asm.members) != 3 {
+		t.Fatalf("Assemble saw %d members, want 3", len(asm.members))
+	}
+	for _, m := range asm.members {
+		if m.Address == "efa ok" {
+			t.Errorf("member %s: Address was clobbered by Readiness.Detail (the bug)", m.ID)
+		}
+		if m.Address == "" || m.Address[:5] != "10.0." {
+			t.Errorf("member %s: Address=%q, want the Observer's 10.0.0.x", m.ID, m.Address)
+		}
+	}
+
+	// (2) Detail still surfaces — in the Record / Explain, where it's documented to go.
+	rec := outcome.Records["n-1"]
+	if rec.EnrollDetail != "efa ok" {
+		t.Errorf("Record.EnrollDetail=%q, want \"efa ok\"", rec.EnrollDetail)
+	}
+	if !containsStr(rec.Explain(), "efa ok") {
+		t.Errorf("Explain() should surface enrollment detail:\n%s", rec.Explain())
+	}
+}
+
+func containsStr(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return sub == ""
+}
