@@ -10,7 +10,7 @@ import (
 
 func TestNewEntityIntent_HappyPath(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
-	intent, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", rung, nil, "")
+	intent, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", RungPlacement{Rung: rung}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -24,14 +24,23 @@ func TestNewEntityIntent_HappyPath(t *testing.T) {
 
 func TestNewEntityIntent_RejectsEmptyID(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
-	_, err := NewEntityIntent("gauss", "", "gen-1", "c1", rung, nil, "")
+	_, err := NewEntityIntent("gauss", "", "gen-1", "c1", RungPlacement{Rung: rung}, "")
 	if err == nil {
 		t.Error("expected error for empty ID")
 	}
 }
 
+func TestNewEntityIntent_RejectsNilPlacement(t *testing.T) {
+	_, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", nil, "")
+	if err == nil {
+		t.Error("expected error for nil Placement")
+	}
+}
+
 func TestNewEntityIntent_RejectsZeroRung(t *testing.T) {
-	_, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", Rung{}, nil, "")
+	// A RungPlacement with a zero Rung (empty InstanceType) must be rejected by
+	// the provider's Validate() self-check.
+	_, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", RungPlacement{Rung: Rung{}}, "")
 	if err == nil {
 		t.Error("expected error for zero Rung (empty InstanceType)")
 	}
@@ -40,7 +49,7 @@ func TestNewEntityIntent_RejectsZeroRung(t *testing.T) {
 func TestNewEntityIntent_RejectsZeroRungInChain(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
 	chain := []Rung{rung, {}} // second rung has empty InstanceType
-	_, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", rung, chain, "")
+	_, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", RungPlacement{Rung: rung, Chain: chain}, "")
 	if err == nil {
 		t.Error("expected error for zero Rung inside FallbackChain")
 	}
@@ -50,11 +59,11 @@ func TestNewEntityIntent_TokenDeterminism(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
 
 	// Same (cluster, entity, generation) → same token across two calls.
-	a, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", rung, nil, "")
+	a, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", RungPlacement{Rung: rung}, "")
 	if err != nil {
 		t.Fatalf("call A: %v", err)
 	}
-	b, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", rung, nil, "")
+	b, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", RungPlacement{Rung: rung}, "")
 	if err != nil {
 		t.Fatalf("call B: %v", err)
 	}
@@ -63,7 +72,7 @@ func TestNewEntityIntent_TokenDeterminism(t *testing.T) {
 	}
 
 	// Different generation → different token.
-	c, err := NewEntityIntent("gauss", "gpu-001", "gen-2", "c1", rung, nil, "")
+	c, err := NewEntityIntent("gauss", "gpu-001", "gen-2", "c1", RungPlacement{Rung: rung}, "")
 	if err != nil {
 		t.Fatalf("call C: %v", err)
 	}
@@ -72,7 +81,7 @@ func TestNewEntityIntent_TokenDeterminism(t *testing.T) {
 	}
 
 	// Caller-supplied token is preserved verbatim.
-	d, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", rung, nil, "explicit-tok")
+	d, err := NewEntityIntent("gauss", "gpu-001", "gen-1", "c1", RungPlacement{Rung: rung}, "explicit-tok")
 	if err != nil {
 		t.Fatalf("call D: %v", err)
 	}
@@ -85,7 +94,7 @@ func TestNewEntityIntent_TokenDeterminism(t *testing.T) {
 
 func TestNewSerialCohort_HappyPath(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
-	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", rung, nil, "")
+	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", RungPlacement{Rung: rung}, "")
 	c, err := NewSerialCohort("c-s", intent, PhaseBudget{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -100,7 +109,7 @@ func TestNewSerialCohort_HappyPath(t *testing.T) {
 
 func TestNewSerialCohort_ZeroBudgetDefaulted(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
-	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", rung, nil, "")
+	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", RungPlacement{Rung: rung}, "")
 	c, err := NewSerialCohort("c-s", intent, PhaseBudget{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -113,7 +122,7 @@ func TestNewSerialCohort_ZeroBudgetDefaulted(t *testing.T) {
 
 func TestNewSerialCohort_ExplicitBudgetHonored(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
-	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", rung, nil, "")
+	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", RungPlacement{Rung: rung}, "")
 	explicit := PhaseBudget{LaunchAcked: 42 * time.Second, Running: 1 * time.Hour,
 		Enrolled: 30 * time.Second, CohortBarrier: 10 * time.Second, CohortAssembly: 5 * time.Second}
 	c, err := NewSerialCohort("c-s", intent, explicit)
@@ -126,7 +135,7 @@ func TestNewSerialCohort_ExplicitBudgetHonored(t *testing.T) {
 }
 
 func TestNewSerialCohort_RejectsEmptyID(t *testing.T) {
-	bad := EntityIntent{ID: "", Rung: Rung{InstanceType: "m5.xlarge"}}
+	bad := EntityIntent{ID: "", Placement: RungPlacement{Rung: Rung{InstanceType: "m5.xlarge"}}}
 	_, err := NewSerialCohort("c-s", bad, PhaseBudget{})
 	if err == nil {
 		t.Error("expected error for empty EntityIntent.ID")
@@ -139,7 +148,7 @@ func TestNewMPICohort_HappyPath(t *testing.T) {
 	rung := Rung{InstanceType: "p5.48xlarge", AvailZone: "us-east-1a"}
 	var members []EntityIntent
 	for i := 0; i < 4; i++ {
-		m, _ := NewEntityIntent("gauss", EntityID(string(rune('a'+i))), "gen-1", "c-mpi", rung, nil, "")
+		m, _ := NewEntityIntent("gauss", EntityID(string(rune('a'+i))), "gen-1", "c-mpi", RungPlacement{Rung: rung}, "")
 		members = append(members, m)
 	}
 	c, err := NewMPICohort("c-mpi", members, PhaseBudget{})
@@ -164,7 +173,7 @@ func TestNewPartialCohort_HappyPath(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
 	var members []EntityIntent
 	for i := 0; i < 5; i++ {
-		m, _ := NewEntityIntent("gauss", EntityID(string(rune('a'+i))), "gen-1", "c-p", rung, nil, "")
+		m, _ := NewEntityIntent("gauss", EntityID(string(rune('a'+i))), "gen-1", "c-p", RungPlacement{Rung: rung}, "")
 		members = append(members, m)
 	}
 	c, err := NewPartialCohort("c-p", members, PhaseBudget{}, 3, nil)
@@ -178,7 +187,7 @@ func TestNewPartialCohort_HappyPath(t *testing.T) {
 
 func TestNewPartialCohort_RejectsZeroMinViable(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
-	m, _ := NewEntityIntent("gauss", "n-0", "gen-1", "c-p", rung, nil, "")
+	m, _ := NewEntityIntent("gauss", "n-0", "gen-1", "c-p", RungPlacement{Rung: rung}, "")
 	_, err := NewPartialCohort("c-p", []EntityIntent{m}, PhaseBudget{}, 0, nil)
 	if err == nil {
 		t.Error("expected error for MinViable=0")
@@ -187,7 +196,7 @@ func TestNewPartialCohort_RejectsZeroMinViable(t *testing.T) {
 
 func TestNewPartialCohort_RejectsMinViableExceedsMembers(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
-	m, _ := NewEntityIntent("gauss", "n-0", "gen-1", "c-p", rung, nil, "")
+	m, _ := NewEntityIntent("gauss", "n-0", "gen-1", "c-p", RungPlacement{Rung: rung}, "")
 	_, err := NewPartialCohort("c-p", []EntityIntent{m}, PhaseBudget{}, 5, nil)
 	if err == nil {
 		t.Error("expected error for MinViable > len(members)")
@@ -199,7 +208,7 @@ func TestNewPartialCohort_RejectsMinViableExceedsMembers(t *testing.T) {
 
 func TestNewSerialCohort_ZeroBudget_PhaseActuallyRuns(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
-	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", rung, nil, "")
+	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", RungPlacement{Rung: rung}, "")
 	c, err := NewSerialCohort("c-s", intent, PhaseBudget{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -245,7 +254,7 @@ func TestReadiness_Operational_RoundTripsEnroller(t *testing.T) {
 		},
 	}
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
-	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", rung, nil, "")
+	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", RungPlacement{Rung: rung}, "")
 	c, _ := NewSerialCohort("c-s", intent, PhaseBudget{})
 
 	r := &Reconciler{
@@ -270,7 +279,7 @@ func TestReadiness_NotOperational_PreventsCohortReady(t *testing.T) {
 		},
 	}
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
-	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", rung, nil, "")
+	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", RungPlacement{Rung: rung}, "")
 	c, _ := NewSerialCohort("c-s", intent, PhaseBudget{
 		LaunchAcked:    2 * time.Second,
 		Running:        2 * time.Second,
@@ -306,7 +315,7 @@ func TestApplyDefaultBudget_PartialFill(t *testing.T) {
 		CohortAssembly: 30 * time.Second,
 	}
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
-	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", rung, nil, "")
+	intent, _ := NewEntityIntent("gauss", "gpu-001", "gen-1", "c-s", RungPlacement{Rung: rung}, "")
 	c, err := NewSerialCohort("c-s", intent, partial)
 	if err != nil {
 		t.Fatalf("NewSerialCohort: %v", err)
@@ -369,7 +378,7 @@ func TestNewPartialCohort_RejectsAssembler(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
 	var members []EntityIntent
 	for i := 0; i < 3; i++ {
-		m, _ := NewEntityIntent("gauss", EntityID(string(rune('a'+i))), "gen-1", "c-p", rung, nil, "")
+		m, _ := NewEntityIntent("gauss", EntityID(string(rune('a'+i))), "gen-1", "c-p", RungPlacement{Rung: rung}, "")
 		members = append(members, m)
 	}
 	asm := &fakeAssembler{}
@@ -385,7 +394,7 @@ func TestReconcile_PartialCohort_AssemblerGuard(t *testing.T) {
 	rung := Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}
 	var members []EntityIntent
 	for i := 0; i < 3; i++ {
-		m, _ := NewEntityIntent("gauss", EntityID(string(rune('a'+i))), "gen-1", "c-p", rung, nil, "")
+		m, _ := NewEntityIntent("gauss", EntityID(string(rune('a'+i))), "gen-1", "c-p", RungPlacement{Rung: rung}, "")
 		members = append(members, m)
 	}
 	// Construct via struct literal to bypass the constructor check.

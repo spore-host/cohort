@@ -76,7 +76,7 @@ type entityTracker struct {
 	startedAt       time.Time
 }
 
-func (t *entityTracker) addAttempt(rung Rung, phase Phase, f *Fault) {
+func (t *entityTracker) addAttempt(rung PlacementRung, phase Phase, f *Fault) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.attempts = append(t.attempts, Attempt{Rung: rung, Phase: phase, Fault: f, At: time.Now()})
@@ -422,7 +422,7 @@ func (r *Reconciler) doLaunch(ctx context.Context, tr *entityTracker) bool {
 		var obs Observation
 		var err error
 
-		if tr.intent.Rung.WarmStart {
+		if tr.intent.Placement.Current().WarmStart {
 			obs, err = r.Actuator.Start(ctx, tr.intent.ID)
 		} else {
 			obs, err = r.Actuator.Launch(ctx, tr.intent)
@@ -432,7 +432,7 @@ func (r *Reconciler) doLaunch(ctx context.Context, tr *entityTracker) bool {
 			tr.mu.Lock()
 			tr.obs = obs
 			tr.mu.Unlock()
-			tr.addAttempt(tr.intent.Rung, PhaseLaunchAcked, nil)
+			tr.addAttempt(tr.intent.Placement.Current(), PhaseLaunchAcked, nil)
 			return true
 		}
 
@@ -442,7 +442,7 @@ func (r *Reconciler) doLaunch(ctx context.Context, tr *entityTracker) bool {
 		case FaultRetryableConsistency:
 			consistencyAttempt++
 			if consistencyAttempt > maxConsistencyRetries {
-				tr.addAttempt(tr.intent.Rung, PhaseLaunchAcked, &f)
+				tr.addAttempt(tr.intent.Placement.Current(), PhaseLaunchAcked, &f)
 				tr.setTerminal(PhaseLaunchAcked, f)
 				return false
 			}
@@ -456,11 +456,16 @@ func (r *Reconciler) doLaunch(ctx context.Context, tr *entityTracker) bool {
 			sleep(ctx, d)
 
 		case FaultCapacityExhausted:
-			tr.addAttempt(tr.intent.Rung, PhaseLaunchAcked, &f)
-			if !r.advanceRung(&tr.intent, tr.intent.FallbackChain) {
+			tr.addAttempt(tr.intent.Placement.Current(), PhaseLaunchAcked, &f)
+			// Advance the fallback ladder through the opaque Placement seam. The
+			// trigger fault stays capacity-named — it's the AWS provider's signal;
+			// a transport provider simply never emits it (#1).
+			next, ok := tr.intent.Placement.Advance()
+			if !ok {
 				tr.setTerminal(PhaseLaunchAcked, f)
 				return false
 			}
+			tr.intent.Placement = next
 			consistencyAttempt = 0
 
 		case FaultAmbiguous:
@@ -468,12 +473,12 @@ func (r *Reconciler) doLaunch(ctx context.Context, tr *entityTracker) bool {
 			// Treat as terminal with a loud message to surface Step 3 regressions.
 			f.Code = "AmbiguousReachedReconciler"
 			f.Message = "BUG: FaultAmbiguous escaped substrate.Client — Step 3 regression"
-			tr.addAttempt(tr.intent.Rung, PhaseLaunchAcked, &f)
+			tr.addAttempt(tr.intent.Placement.Current(), PhaseLaunchAcked, &f)
 			tr.setTerminal(PhaseLaunchAcked, f)
 			return false
 
 		default: // Terminal
-			tr.addAttempt(tr.intent.Rung, PhaseLaunchAcked, &f)
+			tr.addAttempt(tr.intent.Placement.Current(), PhaseLaunchAcked, &f)
 			tr.setTerminal(PhaseLaunchAcked, f)
 			return false
 		}
@@ -496,7 +501,7 @@ func (r *Reconciler) waitRunning(ctx context.Context, tr *entityTracker) bool {
 		if err != nil {
 			f := r.Classifier.Classify(err)
 			if f.Class == FaultTerminal {
-				tr.addAttempt(tr.intent.Rung, PhaseRunning, &f)
+				tr.addAttempt(tr.intent.Placement.Current(), PhaseRunning, &f)
 				tr.setTerminal(PhaseRunning, f)
 				return false
 			}
@@ -515,7 +520,7 @@ func (r *Reconciler) waitRunning(ctx context.Context, tr *entityTracker) bool {
 			case StateFailed, StateDraining:
 				f := Fault{Class: FaultTerminal, Code: "InstanceFailed",
 					Message: fmt.Sprintf("instance entered state %s during phase 2", obs[0].State)}
-				tr.addAttempt(tr.intent.Rung, PhaseRunning, &f)
+				tr.addAttempt(tr.intent.Placement.Current(), PhaseRunning, &f)
 				tr.setTerminal(PhaseRunning, f)
 				return false
 			}
@@ -551,24 +556,9 @@ func (r *Reconciler) waitEnrolled(ctx context.Context, tr *entityTracker) {
 	}
 }
 
-// advanceRung selects the next rung from the entity's approved fallback chain
-// after a FaultCapacityExhausted. Returns false when the chain is exhausted.
-// chain is nil when the entity only has one rung in intent.Rung (common case);
-// the caller passes the full chain from partitions.yaml when available.
-func (r *Reconciler) advanceRung(intent *EntityIntent, chain []Rung) bool {
-	if chain == nil || len(chain) == 0 {
-		// No approved chain — single-rung intent, nothing to advance.
-		return false
-	}
-	// Find current rung in chain.
-	for i, rung := range chain {
-		if rung == intent.Rung && i+1 < len(chain) {
-			intent.Rung = chain[i+1]
-			return true
-		}
-	}
-	return false
-}
+// Fallback-ladder advancement now lives behind the Placement seam
+// (Placement.Advance); the AWS implementation is RungPlacement.Advance in
+// entity.go. The reconciler no longer knows what a rung is (#1).
 
 // Drain marks the given entities for teardown after a cohort failure,
 // so no member is left Running-but-useless and billing.
@@ -596,7 +586,7 @@ func (r *Reconciler) recordDeadline(tr *entityTracker, phase Phase) {
 		Code:    "PhaseBudgetExceeded",
 		Message: fmt.Sprintf("phase %s budget exceeded", phase),
 	}
-	tr.addAttempt(tr.intent.Rung, phase, &f)
+	tr.addAttempt(tr.intent.Placement.Current(), phase, &f)
 	tr.setTerminal(phase, f)
 }
 

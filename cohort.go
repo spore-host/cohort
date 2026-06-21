@@ -151,13 +151,8 @@ func validateIntent(m EntityIntent) error {
 	if m.ID == "" {
 		return errors.New("cohort: EntityIntent.ID must not be empty")
 	}
-	if err := validateRung(m.Rung); err != nil {
-		return fmt.Errorf("cohort: EntityIntent %q Rung: %w", m.ID, err)
-	}
-	for i, r := range m.FallbackChain {
-		if err := validateRung(r); err != nil {
-			return fmt.Errorf("cohort: EntityIntent %q FallbackChain[%d]: %w", m.ID, i, err)
-		}
+	if err := validatePlacement(m.Placement); err != nil {
+		return fmt.Errorf("cohort: EntityIntent %q Placement: %w", m.ID, err)
 	}
 	return nil
 }
