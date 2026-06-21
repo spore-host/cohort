@@ -27,15 +27,14 @@ type EntityIntent struct {
 	Generation Generation
 	Cohort     CohortID
 
-	// Rung is the (instance type, AZ, capacity model) currently selected from
-	// the approved fallback chain. The reconciler advances this on a
-	// FaultCapacityExhausted; it never substitutes outside the chain.
-	Rung Rung
-
-	// FallbackChain is the ordered list of approved rungs from partitions.yaml.
-	// The reconciler advances through this chain on FaultCapacityExhausted;
-	// it NEVER substitutes a rung outside it. Empty means single-rung (no fallback).
-	FallbackChain []Rung
+	// Placement is the provider-specific placement payload, opaque to the core
+	// (#1). It is the seam parallel to Classifier: the reconciler drives the
+	// fallback ladder through it — Advance on a fallback-eligible fault — but
+	// never inspects its fields. The AWS provider supplies a RungPlacement
+	// (instance type / AZ / capacity model); an agent-transport provider
+	// supplies its own (goroutine → session → instance) and never sees a
+	// CapacityModel. The core learns only what Current() renders.
+	Placement Placement
 
 	// IdempotencyToken is deterministic in (cluster, entity, generation).
 	// It collapses FaultAmbiguous at the substrate layer — re-issuing a mutation
@@ -52,19 +51,15 @@ type EntityIntent struct {
 //
 // Validation:
 //   - ID must not be empty.
-//   - Rung.InstanceType must not be empty (catches uninitialized Rung).
-//   - Every rung in FallbackChain must have a non-empty InstanceType.
-func NewEntityIntent(cluster string, id EntityID, gen Generation, cohortID CohortID, rung Rung, chain []Rung, token string) (EntityIntent, error) {
+//   - placement must be non-nil and its Current().Name must be non-empty
+//     (catches an uninitialized placement — the provider-agnostic equivalent of
+//     the old "empty InstanceType" check).
+func NewEntityIntent(cluster string, id EntityID, gen Generation, cohortID CohortID, placement Placement, token string) (EntityIntent, error) {
 	if id == "" {
 		return EntityIntent{}, errors.New("cohort: EntityIntent.ID must not be empty")
 	}
-	if err := validateRung(rung); err != nil {
-		return EntityIntent{}, errors.New("cohort: EntityIntent.Rung: " + err.Error())
-	}
-	for i, r := range chain {
-		if err := validateRung(r); err != nil {
-			return EntityIntent{}, fmt.Errorf("cohort: EntityIntent.FallbackChain[%d]: %w", i, err)
-		}
+	if err := validatePlacement(placement); err != nil {
+		return EntityIntent{}, fmt.Errorf("cohort: EntityIntent.Placement: %w", err)
 	}
 	if token == "" {
 		token = Token(cluster, string(id), string(gen))
@@ -73,16 +68,53 @@ func NewEntityIntent(cluster string, id EntityID, gen Generation, cohortID Cohor
 		ID:               id,
 		Generation:       gen,
 		Cohort:           cohortID,
-		Rung:             rung,
-		FallbackChain:    chain,
+		Placement:        placement,
 		IdempotencyToken: token,
 	}, nil
 }
 
-// Rung is one option in a capacity fallback chain. There is no "safe
+// Placement is the provider-specific placement payload and fallback ladder,
+// opaque to the core (#1). It is the seam that keeps cohort provider-agnostic:
+// the reconciler advances the ladder on a fallback-eligible fault but never
+// inspects what a rung means. AWS supplies RungPlacement; an agent-transport
+// provider supplies its own (goroutine → session → instance).
+type Placement interface {
+	// Current returns the legible identity of the rung currently selected —
+	// what Record/Attempt/Explain render. It must have a non-empty Name.
+	Current() PlacementRung
+	// Advance returns the next placement in the approved fallback chain and true,
+	// or false when the chain is exhausted. It must NEVER substitute a rung
+	// outside the approved chain. The returned Placement is a new value; the
+	// receiver is not mutated.
+	Advance() (Placement, bool)
+}
+
+// PlacementRung is the core-visible, provider-agnostic view of one rung: a
+// human-legible name, a provider-defined class, and whether selecting it means
+// resuming a warm entity vs. a cold launch. This is all the core needs — the
+// provider's real placement fields (instance type, AZ, capacity model, …) stay
+// inside the provider's Placement implementation.
+type PlacementRung struct {
+	// Name is the legible identifier rendered in Record/Explain, e.g.
+	// "p5.48xlarge/us-east-1a/spot" (AWS) or "a2a-session" / "goroutine" (Telos).
+	Name string
+	// Class is a provider-defined category, e.g. AWS capacity model ("spot") or
+	// a transport rung kind. Free-form; the core only displays it.
+	Class string
+	// WarmStart means "resume a Stopped/Hibernated entity" rather than cold-launch
+	// — the one placement property the core acts on (it picks Actuator.Start vs
+	// Launch). A provider with no warm state simply always returns false.
+	WarmStart bool
+}
+
+// Rung is one option in an AWS capacity fallback chain. There is no "safe
 // baseline" — on-demand and spot are both rungs that can fault to capacity;
 // they differ only in ICE probability and price. ODCR/capacity-block rungs
 // are the one kind genuinely reserved against ICE.
+//
+// Rung is the AWS provider's placement vocabulary, not core vocabulary — it is
+// carried into the core via RungPlacement, which adapts it to the Placement
+// seam. A non-AWS provider never constructs a Rung.
 type Rung struct {
 	InstanceType  string
 	AvailZone     string
@@ -91,17 +123,77 @@ type Rung struct {
 	               // Empty AccountID means single-account mode — the correct default.
 
 	// WarmStart means resume a Stopped/Hibernated entity rather than cold-launch.
-	// It is a RUNG property, not a pre-check: if warm-start ICEs, advanceRung
-	// moves to the next rung in the chain exactly like any other ICE.
+	// It is a RUNG property, not a pre-check: if warm-start ICEs, the chain
+	// advances to the next rung exactly like any other ICE.
 	WarmStart bool
 }
 
-// validateRung returns an error if rung has an empty InstanceType.
-// An uninitialized Rung passes a zero InstanceType to Actuator.Launch, which
-// would reach EC2 as garbage. Catch it at construction, not at launch time.
-func validateRung(r Rung) error {
-	if r.InstanceType == "" {
-		return errors.New("InstanceType must not be empty")
+// RungPlacement is the built-in Placement backed by an AWS Rung and its approved
+// fallback chain — the adapter that lets the AWS/MPI consumers migrate to the
+// Placement seam near-mechanically (`Placement: cohort.RungPlacement{Rung: r, Chain: chain}`).
+// The chain is the ordered list of approved rungs; Advance walks it and never
+// substitutes outside it. An empty chain means single-rung (no fallback).
+type RungPlacement struct {
+	Rung  Rung
+	Chain []Rung
+}
+
+// Current renders the active rung for the core's Record/Explain.
+func (p RungPlacement) Current() PlacementRung {
+	return PlacementRung{
+		Name:      fmt.Sprintf("%s/%s/%v", p.Rung.InstanceType, p.Rung.AvailZone, p.Rung.CapacityModel),
+		Class:     fmt.Sprintf("%v", p.Rung.CapacityModel),
+		WarmStart: p.Rung.WarmStart,
+	}
+}
+
+// Advance returns the next approved rung from the chain, or false when exhausted.
+// It mirrors the old advanceRung: find the current rung in the chain by equality,
+// step to the next. A chain that doesn't contain the current rung (or a single-
+// rung intent with no chain) is exhausted immediately.
+func (p RungPlacement) Advance() (Placement, bool) {
+	for i, r := range p.Chain {
+		if r == p.Rung && i+1 < len(p.Chain) {
+			return RungPlacement{Rung: p.Chain[i+1], Chain: p.Chain}, true
+		}
+	}
+	return nil, false
+}
+
+// Validate is the AWS-provider self-check, preserving the old per-rung
+// validation now that the core no longer knows what a Rung is: the active rung
+// and every approved-chain rung must name an instance type. It satisfies the
+// optional Validate() hook that validatePlacement calls (see below).
+func (p RungPlacement) Validate() error {
+	if p.Rung.InstanceType == "" {
+		return errors.New("Rung.InstanceType must not be empty")
+	}
+	for i, r := range p.Chain {
+		if r.InstanceType == "" {
+			return fmt.Errorf("FallbackChain[%d].InstanceType must not be empty", i)
+		}
+	}
+	return nil
+}
+
+// validatePlacement returns an error if placement is nil or unusable. Two
+// layers: (1) a provider-agnostic floor — Current().Name must be non-empty, so
+// an uninitialized placement can't reach Actuator.Launch as garbage; (2) an
+// OPTIONAL deeper self-check — if the placement implements `Validate() error`
+// (RungPlacement does, checking the whole fallback chain), that runs too. The
+// optional hook keeps the required Placement interface at two methods while
+// letting a provider validate its own richer payload.
+func validatePlacement(p Placement) error {
+	if p == nil {
+		return errors.New("must not be nil")
+	}
+	if p.Current().Name == "" {
+		return errors.New("Current().Name must not be empty (uninitialized placement?)")
+	}
+	if v, ok := p.(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -145,16 +145,28 @@ needs and returns only pass/fail; the reconciler never inspects topology.
 | `ID` | ~~Empty string silently creates an entity with no name.~~ **Resolved (OQ-2): `NewEntityIntent` rejects empty ID.** | |
 | `Generation` | Empty string is valid (e.g. bootstrap generation). Fine. | |
 | `Cohort` | Must match the parent Cohort.ID. Not validated. | Low risk; mismatch surfaces in Record, not silently wrong. |
-| `Rung` | ~~Zero-value Rung (empty strings) would pass an empty InstanceType to Launch.~~ **Resolved (OQ-4): `NewEntityIntent` and all Cohort constructors call `validateRung`.** | |
-| `FallbackChain` | Nil/empty = no fallback. This IS the documented contract. Fine. | |
+| `Placement` | ~~Zero-value Rung (empty strings) would pass an empty InstanceType to Launch.~~ **Resolved (#1, v0.2.0): `Rung` + `FallbackChain` replaced by an opaque `Placement` seam. `NewEntityIntent` and the Cohort constructors call `validatePlacement` (nil check + non-empty `Current().Name` + the placement's optional `Validate()`).** | |
 | `IdempotencyToken` | ~~Empty token means no idempotency.~~ **Resolved (OQ-3): `NewEntityIntent` auto-generates via `cohort.Token(cluster, entity, generation)` — deterministic SHA-256 hash. Random tokens are rejected by design; determinism is the idempotency guarantee.** | |
 
-### Rung — caller-constructed, embedded in EntityIntent
+### Placement — the provider-specific placement seam (#1, v0.2.0)
 
-All fields are plain strings or ints. The notable item: `AccountID` is an
-execution-account ID for multi-account routing (ARCHITECTURE §3). Empty AccountID
-means single-account mode. This is the correct default and should stay documented.
-`WarmStart bool` has safe zero (false = cold launch). Fine.
+`EntityIntent` no longer embeds the EC2-shaped `Rung`/`FallbackChain` directly.
+It carries an opaque `Placement` — parallel to how `Classifier` is per-provider.
+The reconciler advances the fallback ladder through `Placement.Advance()` on a
+fallback-eligible fault and renders `Placement.Current()` (a `PlacementRung` of
+`{Name, Class, WarmStart}`) into the `Record`; it never inspects provider fields.
+
+- **AWS provider** supplies `cohort.RungPlacement{Rung, Chain}` — the built-in
+  adapter wrapping today's `Rung` (unchanged, still exported). Migration is
+  near-mechanical: `Rung: r, FallbackChain: chain` → `Placement: cohort.RungPlacement{Rung: r, Chain: chain}`.
+- **Non-cloud providers** (agent transports, …) supply their own `Placement`
+  with no instance type / AZ / capacity model — proven in `placement_test.go`,
+  which reconciles a goroutine→session→instance ladder through the unmodified
+  core. This is the third-consumer generalization the v1.0 thesis depends on.
+
+`Rung` (instance type / AZ / `CapacityModel` / `WarmStart` / multi-account
+`AccountID`) remains the AWS provider's vocabulary, carried into the core only
+via `RungPlacement`. A non-AWS provider never constructs a `Rung`.
 
 ### Cohort — caller-constructed
 
@@ -322,6 +334,7 @@ reusable. Concretely:
 | OQ-7 | `Reconciler.Drain` — keep exported? | Open | Low | Reassess after Phase 2 suspend-sweeper is wired |
 | OQ-8 | `Fault.Retryable` redundant (derivable from Class) | Open | Low | v1.0 cleanup |
 | OQ-9 | `Classifier` interface doc — "MUST NOT return FaultAmbiguous" | **RESOLVED (Step 5.7):** doc comment added to interface | — | — |
+| #1 | `EntityIntent.Rung`'s EC2 field vocabulary doesn't generalize to non-cloud providers | **RESOLVED (v0.2.0):** `Rung`+`FallbackChain` → opaque `Placement` seam; AWS uses built-in `RungPlacement`; non-Rung placement proven in `placement_test.go`. Third-consumer (Telos) report. | — | — |
 
 ---
 

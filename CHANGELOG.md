@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING (#1): `EntityIntent.Rung` + `FallbackChain` replaced by an opaque
+  `Placement` seam.** The EC2/capacity-market vocabulary (`InstanceType`,
+  `AvailZone`, `CapacityModel`, …) was baked into the caller-facing input type,
+  so a non-cloud consumer (e.g. an agent-transport reconciler) had to fabricate
+  fake instance types to construct an intent. `Placement` is now an interface —
+  parallel to `Classifier` being per-provider — that the core advances on a
+  fallback-eligible fault but never inspects. The fallback-ladder *mechanism* is
+  unchanged; only the field vocabulary moved behind the seam.
+  - The AWS/MPI consumers migrate via the built-in `cohort.RungPlacement{Rung, Chain}`
+    adapter (`Rung` and `CapacityModel` stay exported, unchanged):
+    `Rung: r, FallbackChain: chain` → `Placement: cohort.RungPlacement{Rung: r, Chain: chain}`.
+  - `NewEntityIntent`'s signature changes: `(…, rung, chain, token)` →
+    `(…, placement, token)`.
+  - `Record.Attempt.Rung` is now a provider-agnostic `PlacementRung{Name, Class,
+    WarmStart}`, so `Explain()` renders a legible line for any provider.
+  - Coordinated v0.2.0 release: queuezero/substrate (AWS) and Telos (transport)
+    migrate against this tag. `placement_test.go` proves a non-`Rung` placement
+    reconciles end-to-end in cohort's own suite.
+
 ### Added
 - `scripts/guard-cohort.sh` + a `make guard` target + a required CI step that
   assert the core imports no cloud SDK and no scheduler (#2). API.md §8 calls

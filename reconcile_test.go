@@ -8,6 +8,16 @@ import (
 	"time"
 )
 
+// rungOf extracts the AWS Rung from an intent's placement, for fakes that need
+// to see which rung the reconciler currently has selected. The test fakes are
+// the AWS provider's stand-in, so the placement is always a RungPlacement.
+func rungOf(intent EntityIntent) Rung {
+	if rp, ok := intent.Placement.(RungPlacement); ok {
+		return rp.Rung
+	}
+	return Rung{}
+}
+
 // ---- fake ports (no AWS, no Slurm) ------------------------------------------
 
 // fakeActuator controls per-entity responses.
@@ -25,7 +35,7 @@ func (a *fakeActuator) Launch(_ context.Context, intent EntityIntent) (Observati
 		return a.launchFn(intent)
 	}
 	return Observation{ID: intent.ID, Generation: intent.Generation,
-		ProviderID: "i-" + string(intent.ID), State: StateLaunching, Rung: intent.Rung,
+		ProviderID: "i-" + string(intent.ID), State: StateLaunching, Rung: rungOf(intent),
 		ObservedAt: time.Now()}, nil
 }
 
@@ -132,7 +142,7 @@ func member(id string) EntityIntent {
 		Generation:       "g1",
 		Cohort:           "c1",
 		IdempotencyToken: "tok-" + id,
-		Rung:             Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"},
+		Placement:        RungPlacement{Rung: Rung{InstanceType: "m5.xlarge", AvailZone: "us-east-1a"}},
 	}
 }
 
@@ -225,11 +235,9 @@ func TestReconciler_Collective_ICE_FastFails(t *testing.T) {
 	}
 
 	m0 := member("n-0")
-	m0.Rung = rung0
-	m0.FallbackChain = chain
+	m0.Placement = RungPlacement{Rung: rung0, Chain: chain}
 	m1 := member("n-1")
-	m1.Rung = rung0
-	m1.FallbackChain = chain
+	m1.Placement = RungPlacement{Rung: rung0, Chain: chain}
 
 	c := Cohort{
 		ID:        "c-ice",
@@ -356,11 +364,11 @@ func TestReconciler_ChainDiscipline(t *testing.T) {
 	var rungs []Rung
 	act := &fakeActuator{
 		launchFn: func(intent EntityIntent) (Observation, error) {
-			rungs = append(rungs, intent.Rung)
-			if intent.Rung == rung2 {
+			rungs = append(rungs, rungOf(intent))
+			if rungOf(intent) == rung2 {
 				// Last rung succeeds.
 				return Observation{ID: intent.ID, State: StateLaunching,
-					ProviderID: "i-ok", Rung: intent.Rung, ObservedAt: time.Now()}, nil
+					ProviderID: "i-ok", Rung: rungOf(intent), ObservedAt: time.Now()}, nil
 			}
 			return Observation{}, iceErr
 		},
@@ -373,8 +381,7 @@ func TestReconciler_ChainDiscipline(t *testing.T) {
 	r := &Reconciler{Actuator: act, Observer: obs, Classifier: clf, Enroller: enr}
 
 	m := member("gpu-chain")
-	m.Rung = rung0
-	m.FallbackChain = chain
+	m.Placement = RungPlacement{Rung: rung0, Chain: chain}
 
 	c := Cohort{
 		ID:      "c-chain",
@@ -418,7 +425,7 @@ func TestReconciler_Survivors_CohortCancelledDistinct(t *testing.T) {
 				return Observation{}, iceErr
 			}
 			return Observation{ID: intent.ID, State: StateLaunching,
-				ProviderID: "i-" + string(intent.ID), Rung: intent.Rung,
+				ProviderID: "i-" + string(intent.ID), Rung: rungOf(intent),
 				ObservedAt: time.Now()}, nil
 		},
 	}
@@ -427,8 +434,7 @@ func TestReconciler_Survivors_CohortCancelledDistinct(t *testing.T) {
 	}}
 
 	culpritM := member("culprit")
-	culpritM.Rung = rung0
-	culpritM.FallbackChain = chain
+	culpritM.Placement = RungPlacement{Rung: rung0, Chain: chain}
 	survivorA := member("survivor-a")
 	survivorB := member("survivor-b")
 
@@ -522,7 +528,7 @@ func TestReconciler_Survivors_DifferentPhases(t *testing.T) {
 			}
 			// "free-entity": succeeds immediately.
 			return Observation{ID: intent.ID, State: StateLaunching,
-				ProviderID: "i-" + string(intent.ID), Rung: intent.Rung,
+				ProviderID: "i-" + string(intent.ID), Rung: rungOf(intent),
 				ObservedAt: time.Now()}, nil
 		},
 	}
@@ -532,8 +538,7 @@ func TestReconciler_Survivors_DifferentPhases(t *testing.T) {
 	}}
 
 	culpritM := member("culprit")
-	culpritM.Rung = rung0
-	culpritM.FallbackChain = chain
+	culpritM.Placement = RungPlacement{Rung: rung0, Chain: chain}
 
 	c := Cohort{
 		ID:        "c-phases",
@@ -690,7 +695,7 @@ func TestReconciler_AmbiguousBugIsLocalized(t *testing.T) {
 				return Observation{}, ambErr
 			}
 			return Observation{ID: intent.ID, State: StateLaunching,
-				ProviderID: "i-" + string(intent.ID), Rung: intent.Rung,
+				ProviderID: "i-" + string(intent.ID), Rung: rungOf(intent),
 				ObservedAt: time.Now()}, nil
 		},
 	}
@@ -749,7 +754,7 @@ func TestReconciler_WarmStart_ICEAdvancesChain(t *testing.T) {
 		launchFn: func(intent EntityIntent) (Observation, error) {
 			launchCalled++
 			return Observation{ID: intent.ID, State: StateLaunching,
-				ProviderID: "i-cold", Rung: intent.Rung, ObservedAt: time.Now()}, nil
+				ProviderID: "i-cold", Rung: rungOf(intent), ObservedAt: time.Now()}, nil
 		},
 	}
 	clf := &fakeClassifier{faults: map[string]Fault{
@@ -758,8 +763,7 @@ func TestReconciler_WarmStart_ICEAdvancesChain(t *testing.T) {
 	r := &Reconciler{Actuator: act, Observer: &fakeObserver{}, Classifier: clf, Enroller: &fakeEnroller{}}
 
 	m := member("warm-entity")
-	m.Rung = warmRung
-	m.FallbackChain = chain
+	m.Placement = RungPlacement{Rung: warmRung, Chain: chain}
 
 	outcome, err := r.Reconcile(context.Background(), Cohort{
 		ID:      "c-warm",
@@ -869,7 +873,7 @@ func TestReconciler_FastFail_StillCohortCancelled(t *testing.T) {
 				return Observation{}, iceErr
 			}
 			return Observation{ID: intent.ID, State: StateLaunching,
-				ProviderID: "i-" + string(intent.ID), Rung: intent.Rung,
+				ProviderID: "i-" + string(intent.ID), Rung: rungOf(intent),
 				ObservedAt: time.Now()}, nil
 		},
 	}
@@ -884,8 +888,7 @@ func TestReconciler_FastFail_StillCohortCancelled(t *testing.T) {
 	}
 
 	culpritM := member("culprit")
-	culpritM.Rung = rung0
-	culpritM.FallbackChain = chain
+	culpritM.Placement = RungPlacement{Rung: rung0, Chain: chain}
 
 	c := Cohort{
 		ID:        "c-regression",
@@ -965,7 +968,7 @@ func TestReconciler_SurvivorPhase_IsEntityOwn(t *testing.T) {
 			}
 			// fast: returns immediately
 			return Observation{ID: intent.ID, State: StateLaunching,
-				ProviderID: "i-" + string(intent.ID), Rung: intent.Rung,
+				ProviderID: "i-" + string(intent.ID), Rung: rungOf(intent),
 				ObservedAt: time.Now()}, nil
 		},
 	}
@@ -978,8 +981,7 @@ func TestReconciler_SurvivorPhase_IsEntityOwn(t *testing.T) {
 	enr := &fakeEnroller{}
 
 	culpritM := member("culprit")
-	culpritM.Rung = rung0
-	culpritM.FallbackChain = chain
+	culpritM.Placement = RungPlacement{Rung: rung0, Chain: chain}
 
 	c := Cohort{
 		ID:        "c-survivor-phase",
@@ -1162,7 +1164,7 @@ func TestReconciler_FastFail_AssemblerNotCalled(t *testing.T) {
 				return Observation{}, iceErr
 			}
 			return Observation{ID: intent.ID, State: StateLaunching,
-				ProviderID: "i-" + string(intent.ID), Rung: intent.Rung,
+				ProviderID: "i-" + string(intent.ID), Rung: rungOf(intent),
 				ObservedAt: time.Now()}, nil
 		},
 	}
@@ -1171,8 +1173,7 @@ func TestReconciler_FastFail_AssemblerNotCalled(t *testing.T) {
 	}}
 
 	culpritM := member("culprit")
-	culpritM.Rung = rung0
-	culpritM.FallbackChain = chain
+	culpritM.Placement = RungPlacement{Rung: rung0, Chain: chain}
 
 	r := &Reconciler{
 		Actuator:   act,

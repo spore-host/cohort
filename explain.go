@@ -75,9 +75,11 @@ type ParentCancelInfo struct {
 	Cause string
 }
 
-// Attempt records one rung tried for one entity.
+// Attempt records one rung tried for one entity. Rung is the core-visible,
+// provider-agnostic view (PlacementRung) so Explain renders a legible line for
+// any provider — AWS, agent-transport, or otherwise (#1).
 type Attempt struct {
-	Rung  Rung
+	Rung  PlacementRung
 	Phase Phase  // phase reached on this rung before the fault (or PhaseReady)
 	Fault *Fault // nil if this attempt succeeded
 	At    time.Time
@@ -139,7 +141,7 @@ func (r Record) Explain() string {
 		return out
 	}
 	for i, a := range r.Attempts {
-		rung := fmt.Sprintf("%s/%s/%v", a.Rung.InstanceType, a.Rung.AvailZone, a.Rung.CapacityModel)
+		rung := a.Rung.Name
 		if a.Fault != nil {
 			out += fmt.Sprintf("  [%d] %s  reached=%s  -> %s/%s  (%s)\n",
 				i+1, rung, a.Phase, a.Fault.Class, a.Fault.Code, a.At.Format(time.RFC3339))
