@@ -67,10 +67,10 @@ type entityTracker struct {
 	mu              sync.Mutex
 	intent          EntityIntent
 	phase           Phase
-	enrolled        bool             // true only when waitEnrolled returned success
-	enrollDetail    string           // Readiness.Detail from a successful enrollment (for explain)
+	enrolled        bool   // true only when waitEnrolled returned success
+	enrollDetail    string // Readiness.Detail from a successful enrollment (for explain)
 	attempts        []Attempt
-	terminal        *Fault           // set when this entity cannot recover
+	terminal        *Fault            // set when this entity cannot recover
 	cohortCancelled *CohortCancelInfo // cohort fast-failed around this healthy entity
 	parentCancelled *ParentCancelInfo // parent context cancelled the whole reconcile
 	obs             Observation
@@ -83,9 +83,9 @@ type entityTracker struct {
 	// invariant). Instead doLaunch records the attempt and returns via
 	// capacityBlocked so the round loop can drain + advance the shared rung +
 	// restart every member together.
-	collective       bool
-	capacityBlocked  bool   // set by doLaunch when a collective member hit CapacityExhausted
-	capacityFault    Fault  // the fault that blocked it (for the round loop's records)
+	collective      bool
+	capacityBlocked bool  // set by doLaunch when a collective member hit CapacityExhausted
+	capacityFault   Fault // the fault that blocked it (for the round loop's records)
 }
 
 func (t *entityTracker) addAttempt(rung PlacementRung, phase Phase, f *Fault) {
@@ -447,13 +447,13 @@ func (r *Reconciler) reconcileEntity(ctx context.Context, tr *entityTracker, bud
 // (the members are marked collective). After the round:
 //
 //   - all members acked        → set them to PhaseRunning, return true; the
-//                                 per-entity loop takes over from running.
+//     per-entity loop takes over from running.
 //   - any member capacity-blocked → drain any members that DID launch (a
-//                                 placement group can't span AZs, so the cluster
-//                                 must move as a unit), advance the SHARED rung,
-//                                 reset members, restart the round.
+//     placement group can't span AZs, so the cluster
+//     must move as a unit), advance the SHARED rung,
+//     reset members, restart the round.
 //   - any member terminal (non-capacity) → fast-fail: every member terminal,
-//                                 return false.
+//     return false.
 //   - shared chain exhausted    → every member terminal, return false.
 //
 // The AZ invariant holds by construction: every member is always on the same

@@ -1,9 +1,10 @@
 // Package hygiene holds tests that assert on repo wiring rather than on code.
 //
-// It exists because wiring is what rots. Reverting a pin to `@v6` or deleting the
-// Dependabot entry is a one-line change whose absence is completely silent —
-// nothing fails, CI's supply chain just quietly goes back to being mutable, and
-// nobody notices. These tests make that fail. (#7)
+// It exists because wiring is what rots. Reverting a pin to `@v6`, deleting the
+// Dependabot entry, or dropping the format gate is a one-line change whose absence
+// is completely silent — nothing fails, CI's supply chain just quietly goes back to
+// being mutable and the tree starts drifting again. These tests make that fail.
+// (#7, #8)
 //
 // There are no non-test files here by design; the assertions are about the repo.
 //
@@ -24,6 +25,39 @@ import (
 )
 
 const workflows = "../../.github/workflows"
+
+// TestCIGatesFormatting checks that the formatting gate is still wired into CI,
+// and that it REPORTS drift rather than fixing it.
+//
+// The second half is the subtle one. `gofmt -w` rewrites files and exits 0, so a
+// "gate" built on it can only ever report success — green on a dirty tree
+// forever, indistinguishable from having no gate at all. Only `gofmt -l`/`-d` can
+// fail. That is why four files sat unformatted on main: nothing checked, and
+// `go vet` does not look at formatting. This repo has no Makefile, so the gate is
+// inline in the workflow. (#8)
+func TestCIGatesFormatting(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(workflows, "ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci.yml: %v", err)
+	}
+	step, ok := workflowStep(string(data), "Format gate")
+	if !ok {
+		t.Fatal("the CI workflow has no 'Format gate' step; without it nothing " +
+			"prevents unformatted code from reaching main (#8)")
+	}
+	if !strings.Contains(step, "gofmt -l") {
+		t.Error("the Format gate does not run 'gofmt -l'; it must LIST offenders to be able to fail")
+	}
+	// Commands only, not message text: the step's error message tells the reader
+	// to "run 'gofmt -w' on them", which is advice, not an invocation.
+	if strings.Contains(stripQuoted(step), "gofmt -w") {
+		t.Error("the Format gate runs 'gofmt -w': that rewrites files and always exits 0, " +
+			"so it reports success on a dirty tree. A gate must report, not fix.")
+	}
+	if !strings.Contains(step, "exit 1") {
+		t.Error("the Format gate never exits non-zero, so CI can't fail on drift")
+	}
+}
 
 // TestActionsArePinnedToSHAs: every `uses:` in a workflow must name a full 40-hex
 // commit SHA, not a tag.
@@ -136,6 +170,55 @@ func TestDependabotCoversGoModules(t *testing.T) {
 // config ever grows anchors, flow mappings or nesting, these tests will fail
 // loudly (a missing entry is a hard Fatal, never a silent pass) rather than
 // quietly mis-parse, which is the failure mode that matters here.
+
+// workflowStep returns the YAML block for the step named name: from its
+// "- name:" line up to the next line at the same indentation starting a new list
+// item. Scoping to one step matters — otherwise an assertion could be satisfied
+// by an unrelated step elsewhere in the file.
+func workflowStep(doc, name string) (string, bool) {
+	lines := strings.Split(doc, "\n")
+	start := -1
+	var indent string
+	for i, line := range lines {
+		if strings.HasSuffix(strings.TrimSpace(line), "name: "+name) &&
+			strings.HasPrefix(strings.TrimSpace(line), "- ") {
+			start = i
+			indent = line[:strings.Index(line, "- ")]
+			break
+		}
+	}
+	if start < 0 {
+		return "", false
+	}
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], indent+"- ") {
+			return strings.Join(lines[start:i], "\n"), true
+		}
+	}
+	return strings.Join(lines[start:], "\n"), true
+}
+
+// stripQuoted removes single- and double-quoted spans, leaving roughly the
+// commands. Crude, but the question it answers is narrow: does the step RUN
+// something, or merely mention it in a message? (Distinct from unquote below,
+// which unwraps one fully-quoted YAML scalar.)
+func stripQuoted(s string) string {
+	var b strings.Builder
+	var quote rune
+	for _, r := range s {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
 type entry struct {
 	directory string

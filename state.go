@@ -9,14 +9,14 @@ package cohort
 type LifecycleState int
 
 const (
-	StateUnknown   LifecycleState = iota // Observer could not determine — treat as lag, not absence
-	StateAbsent                          // no entity exists for this ID
-	StateLaunching                       // Launch/Start acknowledged, not yet Running
-	StateRunning                         // provider reports running
-	StateStopped                         // warm: EBS persists, instance-store gone
-	StateHibernated                      // RAM frozen to EBS: mounts/processes/page-cache survive
-	StateDraining                        // marked for teardown
-	StateFailed                          // terminal for this generation
+	StateUnknown    LifecycleState = iota // Observer could not determine — treat as lag, not absence
+	StateAbsent                           // no entity exists for this ID
+	StateLaunching                        // Launch/Start acknowledged, not yet Running
+	StateRunning                          // provider reports running
+	StateStopped                          // warm: EBS persists, instance-store gone
+	StateHibernated                       // RAM frozen to EBS: mounts/processes/page-cache survive
+	StateDraining                         // marked for teardown
+	StateFailed                           // terminal for this generation
 )
 
 func (s LifecycleState) String() string {
@@ -44,8 +44,8 @@ func (s LifecycleState) String() string {
 type StopMode int
 
 const (
-	StopWarm StopMode = iota // EBS persists
-	StopHibernate            // RAM frozen to EBS
+	StopWarm      StopMode = iota // EBS persists
+	StopHibernate                 // RAM frozen to EBS
 )
 
 // ---------------------------------------------------------------------------

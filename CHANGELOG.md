@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **CI now fails on unformatted code, and four files that had drifted are
+  reformatted (#8).** `entity.go`, `reconcile.go`, `reconcile_test.go` and
+  `state.go` were not `gofmt`-clean on `main`, because nothing checked: `go vet`
+  does not look at formatting, and the repo has no Makefile target that would.
+  A `Format gate` step in `ci.yml` now runs `gofmt -l` and fails with a diff of
+  the offenders. The distinction matters — a gate built on `gofmt -w` rewrites
+  files and exits 0, so it can only ever report success, which is
+  indistinguishable from having no gate at all. The reformatting is
+  whitespace-only (`git diff --ignore-all-space` is empty). An
+  `internal/hygiene` test asserts the step exists *and* that it lists rather
+  than rewrites, so neither the gate nor its meaning can be quietly removed.
+
 ### Security
 - **CI actions are pinned to commit SHAs, and Dependabot now bumps them (#7).**
   Both `uses:` refs in `ci.yml` were floating tags (`actions/checkout@v6`,

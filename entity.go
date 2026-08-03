@@ -120,7 +120,7 @@ type Rung struct {
 	AvailZone     string
 	CapacityModel CapacityModel
 	AccountID     string // execution account for this rung (multi-account, §3)
-	               // Empty AccountID means single-account mode — the correct default.
+	// Empty AccountID means single-account mode — the correct default.
 
 	// WarmStart means resume a Stopped/Hibernated entity rather than cold-launch.
 	// It is a RUNG property, not a pre-check: if warm-start ICEs, the chain

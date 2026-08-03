@@ -326,8 +326,8 @@ func TestReconciler_PhaseAttribution(t *testing.T) {
 
 	// --- phase-3 failure (enrollment timeout) ---
 	r3 := &Reconciler{
-		Actuator: &fakeActuator{},
-		Observer: &fakeObserver{},
+		Actuator:   &fakeActuator{},
+		Observer:   &fakeObserver{},
 		Classifier: &fakeClassifier{},
 		Enroller: &fakeEnroller{
 			enrolledFn: func(id EntityID) Readiness {
