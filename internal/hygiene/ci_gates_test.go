@@ -73,7 +73,15 @@ func TestCIGatesFormatting(t *testing.T) {
 // whether a pin is current or two years stale.
 func TestActionsArePinnedToSHAs(t *testing.T) {
 	// A local `uses: ./.github/...` is a path, not a registry ref — nothing to pin.
-	pinned := regexp.MustCompile(`^[^@\s]+@[0-9a-f]{40}\s+#\s*v?\d`)
+	//
+	// The comment must be an EXACT vX.Y.Z, not a bare `# v6`. A bare major cannot be
+	// checked against the SHA and can silently misstate what CI runs: Dependabot
+	// bumped nf-spawn's checkout pin to a v7.0.1 SHA while leaving the comment
+	// reading `# v6`, and the older `v?\d` form of this regex passed it. A wrong
+	// label is worse than a missing one — it makes a major-version jump read as a
+	// routine same-line bump. scripts/verify-pins.sh checks comment-against-tag for
+	// real; that needs the network, so it stays out of this package.
+	pinned := regexp.MustCompile(`^[^@\s]+@[0-9a-f]{40}\s+#\s*v\d+\.\d+\.\d+\s*$`)
 	found := 0
 	for _, f := range workflowFiles(t) {
 		data, err := os.ReadFile(f)
@@ -88,7 +96,8 @@ func TestActionsArePinnedToSHAs(t *testing.T) {
 			found++
 			if !pinned.MatchString(ref) {
 				t.Errorf("%s:%d: %q is not pinned to a full commit SHA with a version comment.\n"+
-					"A tag is mutable, so the code CI runs can change without a commit here. Use:\n"+
+					"A tag is mutable, so the code CI runs can change without a commit here,\n"+
+					"and the comment must name an exact version so it can be checked. Use:\n"+
 					"    uses: owner/action@<40-hex-sha> # vX.Y.Z",
 					filepath.Base(f), i+1, ref)
 			}

@@ -19,6 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whitespace-only (`git diff --ignore-all-space` is empty). An
   `internal/hygiene` test asserts the step exists *and* that it lists rather
   than rewrites, so neither the gate nor its meaning can be quietly removed.
+- **A pin's version comment can no longer silently misstate what CI runs (#11).**
+  `TestActionsArePinnedToSHAs` required only that *some* `# vN` comment be present,
+  never that it was true. A wrong label is worse than a missing one: it makes a
+  major-version jump read as a routine same-line bump. Not hypothetical —
+  Dependabot bumped nf-spawn's `checkout` pin to a **v7.0.1** SHA while leaving the
+  comment reading `# v6`, and the identical regex passed it. Two
+  complementary halves now: the test requires an exact `vX.Y.Z` (offline,
+  stdlib-only, hermetic), and a new `scripts/verify-pins.sh` resolves each SHA
+  against the tag its comment claims and fails if they disagree (needs the network,
+  so it runs as its own CI step). Neither alone suffices — a bare label defeats the
+  second, an exact-but-false one defeats the first.
+  cohort's own two pins were already exact and true, so nothing needed relabelling
+  here; the gate is what changed.
 
 ### Security
 - **CI actions are pinned to commit SHAs, and Dependabot now bumps them (#7).**

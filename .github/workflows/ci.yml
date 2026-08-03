@@ -15,10 +15,10 @@ jobs:
       # really did move (df4cb1c -> d23441a) with no signal to consumers.
       # Dependabot bumps these pins (.github/dependabot.yml) so they stay current
       # without being mutable; internal/hygiene keeps both true. (#7)
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
 
@@ -55,3 +55,12 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+      # The half of pin hygiene that needs the network, so it can't live in the
+      # (hermetic, stdlib-only) internal/hygiene package: does each pin's
+      # `# vX.Y.Z` actually name the tag its SHA carries? A wrong label is worse
+      # than none — it makes a major-version jump read as a routine same-line bump,
+      # which is how a checkout v6 -> v7.0.1 bump nearly landed in nf-spawn
+      # labelled `# v6`. Read-only (git ls-remote), no auth.
+      - name: Verify pin comments match their SHAs
+        run: ./scripts/verify-pins.sh
