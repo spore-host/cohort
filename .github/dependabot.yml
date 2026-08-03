@@ -1,0 +1,75 @@
+# Dependabot configuration for cohort.
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Why this file exists: ci.yml pins both actions to commit SHAs (#7), which closes
+# the mutable-tag hole but opens a staleness one — a pinned SHA never moves,
+# including past a security fix, and unlike a `@v6` tag nothing updates it.
+# Pinning is only safe when something bumps the pins. That something is this file.
+# The two are one control, not two.
+#
+# This repo has no security workflow: no govulncheck, no Trivy, no Semgrep. So
+# Dependabot is not a second opinion here, it is the only thing watching either
+# the actions or golang.org/x/sync.
+#
+# Lowest-authority repo in the suite: no release workflow, no publish credentials,
+# no OIDC, no AWS access — CI is `contents: read` and runs `go test`. The pins are
+# here so this repo doesn't quietly diverge from the suite baseline, not because
+# CI holds anything worth stealing.
+
+version: 2
+updates:
+  # GitHub Actions. Dependabot understands SHA pins: it rewrites both the SHA and
+  # the trailing `# vX.Y.Z` comment, so the pins stay readable and reviewable, and
+  # internal/hygiene's TestActionsArePinnedToSHAs keeps passing across a bump.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    # Don't propose a release the day it ships; let it sit a week first. A fresh
+    # action tag is exactly when a compromised or broken one is still unnoticed.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps(actions)"
+      include: "scope"
+    # No `reviewers:` key on purpose — it's deprecated and inert. Every one of the
+    # umbrella repo's Dependabot PRs asks for a reviewer and none has ever had a
+    # review request. Use CODEOWNERS if you want one.
+    groups:
+      # One PR for all of them. The pattern is "*", not "actions/*": both actions
+      # are under actions/ today, but the first one that isn't would silently fall
+      # outside the group and stop being bumped. TestDependabotCoversEveryAction
+      # checks the patterns actually match every action in use.
+      github-actions:
+        patterns:
+          - "*"
+
+  # Go modules. cohort has exactly one dependency (golang.org/x/sync) and the
+  # import discipline in doc.go / API.md §8 is designed to keep that graph tiny —
+  # but "small" is not "watched", and with no govulncheck in CI an advisory here
+  # would surface nowhere else.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **CI actions are pinned to commit SHAs, and Dependabot now bumps them (#7).**
+  Both `uses:` refs in `ci.yml` were floating tags (`actions/checkout@v6`,
+  `actions/setup-go@v6`). A tag is mutable, so the code running in CI could change
+  with no commit here — not hypothetically: `actions/checkout@v6` moved from
+  `df4cb1c` to `d23441a` with no signal to consumers. Both are now 40-hex SHAs
+  with a `# v6` comment. Pinning alone would only trade a live hole for a slow one
+  (a SHA never moves, including past a security fix), so `.github/dependabot.yml`
+  arrives with it: `github-actions` to bump the pins and `gomod` to watch
+  `golang.org/x/sync`, which nothing was watching — this repo has no govulncheck
+  or Trivy workflow. A new `internal/hygiene` test package fails CI if a pin is
+  reverted or an entry is dropped, since either is a silent one-line change. The
+  tests are stdlib-only on purpose: cohort advertises exactly one dependency, and
+  a YAML library pulled in to read a config would undercut that.
+
 ## [0.2.0] - 2026-06-21
 
 ### Added
