@@ -25,6 +25,25 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # REPORTS drift, never fixes it. `gofmt -w` rewrites files and exits 0, so a
+      # gate built on it can only ever report success — green on a dirty tree
+      # forever, indistinguishable from having no gate at all. Only `gofmt -l`/`-d`
+      # can fail. That is why four files sat unformatted on main: nothing checked,
+      # and `go vet` does not look at formatting. (#8)
+      #
+      # gofmt walks paths rather than modules, so `.` covers everything. No vendor/
+      # dir here, but the filter matches the rest of the suite's gate.
+      - name: Format gate
+        run: |
+          files=$(gofmt -l . | grep -v '^vendor/' || true)
+          if [ -n "$files" ]; then
+            echo "::error::these files are not gofmt-clean — run 'gofmt -w' on them:"
+            echo "$files" | sed 's/^/  /'
+            gofmt -d $files
+            exit 1
+          fi
+          echo "✓ gofmt clean"
+
       # Enforce cohort's import discipline: the core must import no cloud SDK
       # and no scheduler (doc.go, API.md §8 — "not optional"). This is the
       # invariant that lets every consumer trust the SAME unmodified core.
