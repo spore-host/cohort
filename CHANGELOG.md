@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **CI now builds and tests with Go 1.26.9** (was 1.26.8), for the Go
+  vulnerabilities disclosed 2026-10-09: GO-2026-6605, 6607, 6608, 6610, 6611,
+  6612, 6613 and 6617.
+  **This repo was not affected** — govulncheck reports `0 vulnerabilities`, since
+  nothing here reaches the vulnerable standard-library paths, and it does not
+  require `golang.org/x/net`. The pin moves anyway: a toolchain pin should not
+  sit on a patch release with known fixes, and reachability can change with any
+  future commit. Recorded as hygiene rather than as a fix, so the distinction
+  stays visible.
+
 ### Fixed
 - **CI now fails on unformatted code, and four files that had drifted are
   reformatted (#8).** `entity.go`, `reconcile.go`, `reconcile_test.go` and
